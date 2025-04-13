@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeVar, overload
 import sys
 import witty
 import numpy as np
+import numpy.typing as npt
 from Cheetah.Template import Template
 from pathlib import Path
 from ..dtypes import DType
@@ -13,8 +14,11 @@ if TYPE_CHECKING:
 
 DEFINE_MACROS = [("RTREE_NOATOMICS", "1")] if sys.platform == "win32" else []
 
+CT = TypeVar("CT", bound=np.number)
+IT = TypeVar("IT", bound=np.number)
 
-class RTree:
+
+class RTree(Generic[CT, IT]):
     """A generic RTree implementation, compiled on-the-fly during
     instantiation.
 
@@ -71,18 +75,25 @@ class RTree:
     # overwrite in subclasses for custom distance computation
     c_distance_function: ClassVar[str] = ""
 
-    def __new__(cls, item_dtype: str, coord_dtype: str, dims: int) -> Self:
+    coord_dtype: DType
+    item_dtype: DType
+
+    def __new__(
+        cls, item_dtype: npt.DTypeLike, coord_dtype: npt.DTypeLike, dims: int
+    ) -> Self:
         ############################################
         # create wrapper from template and compile #
         ############################################
+        _coord_dtype = DType(coord_dtype)
+        _item_dtype = DType(item_dtype)
 
         src_dir = Path(__file__).parent
         wrapper_template = Template(
             file=str(src_dir / "wrapper_template.pyx"),
             compilerSettings={"directiveStartToken": "%"},
         )
-        wrapper_template.item_dtype = DType(item_dtype)
-        wrapper_template.coord_dtype = DType(coord_dtype)
+        wrapper_template.item_dtype = _item_dtype
+        wrapper_template.coord_dtype = _coord_dtype
         wrapper_template.dims = dims
         wrapper_template.c_distance_function = cls.c_distance_function
         wrapper_template.pyx_item_t_declaration = cls.pyx_item_t_declaration
@@ -102,15 +113,16 @@ class RTree:
             language="c",
             quiet=True,
             define_macros=DEFINE_MACROS,
+            output_dir=str(Path(__file__).parent),
+            name=f"rtree_{_item_dtype.base}_{_coord_dtype.base}_{dims}d".lower(),
         )
         RTreeType = type(cls.__name__, (cls, wrapper.RTree), {})
-        return wrapper.RTree.__new__(RTreeType)
+        obj = wrapper.RTree.__new__(RTreeType)
+        obj.coord_dtype = _coord_dtype
+        obj.item_dtype = _item_dtype
+        return obj
 
-    def __init__(self, item_dtype, coord_dtype, dims):
-        super().__init__()
-        self.item_dtype = DType(item_dtype)
-
-    def insert_point_item(self, item, position):
+    def insert_point_item(self, item: IT, position: npt.NDArray[CT]) -> None:
         items = np.array([item], dtype=self.item_dtype.base)
         positions = position[np.newaxis]
         return self.insert_point_items(items, positions)
@@ -123,20 +135,95 @@ class RTree:
 
     if TYPE_CHECKING:
 
-        def insert_point_items(self, items: np.ndarray, points: np.ndarray) -> None: ...
-        def insert_bb_items(
-            self, items: np.ndarray, bb_mins: np.ndarray, bb_maxs: np.ndarray
+        def insert_point_items(
+            self, items: npt.NDArray[IT], points: npt.NDArray[CT]
         ) -> None: ...
-        def count(self, bb_min: np.ndarray, bb_max: np.ndarray) -> int: ...
-        def bounding_box(self) -> tuple[np.ndarray, np.ndarray]: ...
-        def search(self, bb_min: np.ndarray, bb_max: np.ndarray) -> np.ndarray: ...
+        def insert_bb_items(
+            self,
+            items: npt.NDArray[IT],
+            bb_mins: npt.NDArray[CT],
+            bb_maxs: npt.NDArray[CT],
+        ) -> None: ...
+        def count(self, bb_min: npt.NDArray[CT], bb_max: npt.NDArray[CT]) -> int: ...
+        def bounding_box(self) -> tuple[npt.NDArray[CT], npt.NDArray[CT]]: ...
+        def search(
+            self, bb_min: npt.NDArray[CT], bb_max: npt.NDArray[CT]
+        ) -> npt.NDArray[IT]: ...
+        @overload
         def nearest(
-            self, point: np.ndarray, k: int, return_distances: bool = False
-        ) -> np.ndarray | tuple[np.ndarray, np.ndarray]: ...
+            self, point: npt.NDArray[CT], k: int, return_distances: Literal[True]
+        ) -> tuple[npt.NDArray[IT], npt.NDArray[CT]]: ...
+        @overload
+        def nearest(
+            self, point: npt.NDArray[CT], k: int, return_distances: Literal[False] = ...
+        ) -> npt.NDArray[IT]: ...
+        def nearest(
+            self, point: npt.NDArray[CT], k: int, return_distances: bool = False
+        ) -> npt.NDArray[IT] | tuple[npt.NDArray[IT], npt.NDArray[CT]]: ...
         def delete_items(
             self,
-            items: np.ndarray,
-            bb_mins: np.ndarray,
-            bb_maxs: np.ndarray | None = None,
+            items: npt.NDArray[IT],
+            bb_mins: npt.NDArray[CT],
+            bb_maxs: npt.NDArray[CT] | None = None,
         ) -> int: ...
         def __len__(self) -> int: ...
+
+
+class RTree2D(RTree[CT, IT]):
+    def __new__(cls, item_dtype: npt.DTypeLike, coord_dtype: npt.DTypeLike) -> Self:
+        return super().__new__(cls, item_dtype, coord_dtype, 2)
+
+
+class RTree2DInt(RTree2D[np.int64, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.int64)
+
+
+class RTree2DFloat(RTree2D[np.float64, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.float64)
+
+
+class RTree2DFloat32(RTree2D[np.float32, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.float32)
+
+
+class RTree3D(RTree[CT, IT]):
+    def __new__(cls, item_dtype: npt.DTypeLike, coord_dtype: npt.DTypeLike) -> Self:
+        return super().__new__(cls, item_dtype, coord_dtype, 3)
+
+
+class RTree3DInt(RTree3D[np.int64, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.int64)
+
+
+class RTree3DFloat(RTree3D[np.float64, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.float64)
+
+
+class RTree3DFloat32(RTree3D[np.float32, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.float32)
+
+
+class RTree4D(RTree[CT, IT]):
+    def __new__(cls, item_dtype: npt.DTypeLike, coord_dtype: npt.DTypeLike) -> Self:
+        return super().__new__(cls, item_dtype, coord_dtype, 4)
+
+
+class RTree4DInt(RTree4D[np.int64, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.int64)
+
+
+class RTree4DFloat(RTree4D[np.float64, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.float64)
+
+
+class RTree4DFloat32(RTree4D[np.float32, IT], Generic[IT]):
+    def __new__(cls, item_dtype: str) -> Self:
+        return super().__new__(cls, item_dtype, np.float32)

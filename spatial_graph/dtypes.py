@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from contextlib import suppress
+import numbers
 import re
+
+import numpy as np
+import numpy.typing as npt
 
 # Define valid base types
 VALID_BASE_TYPES = {
     # Floating-point types (no _t suffix)
     "float": "float",
-    "float32": "float",
     "double": "double",
-    "float64": "double",
     # Fixed-width integer types
     "int8": "int8_t",
     "int16": "int16_t",
@@ -18,13 +21,11 @@ VALID_BASE_TYPES = {
     "uint16": "uint16_t",
     "uint32": "uint32_t",
     "uint64": "uint64_t",
-    # Platform-dependent types mapped to fixed-width equivalents
-    "int": "int32_t",  # Map generic int to standard 32-bit
-    "uint": "uint32_t",  # Map generic uint to standard 32-bit
 }
+_aliases = {"int": "int64", "uint": "uint64", "float32": "float", "float64": "double"}
 
 # Regex pattern for dtype validation and extraction
-DTYPE_PATTERN = r"^({})(?:\[(\d+)\])?$".format("|".join(VALID_BASE_TYPES))
+DTYPE_PATTERN = r"^({})(?:\[(\d+)\])?$".format("|".join(VALID_BASE_TYPES | _aliases))
 DTYPE_REGEX = re.compile(DTYPE_PATTERN)
 
 
@@ -39,22 +40,25 @@ class DType:
         optional.
     """
 
-    def __init__(self, dtype_str: str) -> None:
-        self.as_string = dtype_str
+    def __init__(self, dtype_str: npt.DTypeLike) -> None:
         self.base, self.size = self.__parse_array_dtype(dtype_str)
+        self.as_string = f"{self.base}[{self.size}]" if self.size else self.base
         self.is_array = self.size is not None
         self.shape = (self.size,) if self.is_array else ()
 
-    def __parse_array_dtype(self, dtype_str: str) -> tuple[str, int | None]:
+    def __parse_array_dtype(self, dtype_str: npt.DTypeLike) -> tuple[str, int | None]:
         """Parse the array dtype string into base type and size."""
+        with suppress(TypeError):
+            dtype_str = np.dtype(dtype_str).name
 
-        if not (match := DTYPE_REGEX.match(dtype_str)):
+        if not (match := DTYPE_REGEX.match(str(dtype_str))):
             raise ValueError(
                 f"Invalid dtype string: {dtype_str!r}. Must have base type of "
                 f"{list(VALID_BASE_TYPES)!r} and optional size in square brackets."
             )
 
         base = match.group(1)
+        base = _aliases.get(base, base)
         size = int(match.group(2)) if match.group(2) else None
 
         if base not in VALID_BASE_TYPES:  # pragma: no cover
@@ -142,3 +146,17 @@ class DType:
                 return f"{name}[{array_index}]"
             else:
                 return name
+
+    def __str__(self) -> str:
+        return self.as_string
+
+    def __repr__(self) -> str:
+        return f"DType({self.as_string!r})"
+
+    @property
+    def dtype(self) -> np.dtype:
+        """Support passing this object to np.astype().
+
+        NOTE: this will fail for is_array like types. (as it should)
+        """
+        return np.dtype(self.as_string)
